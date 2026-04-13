@@ -1,0 +1,8 @@
+{
+    "lora_path": "/home/sbjeon/workspace/sb/train/output/dog_playing_flute",
+    "prompt": "A dog playing a flute, wearing a light linen shirt and a straw hat, gentle ocean waves rolling in the background",
+    "id_scale": 1.0,
+    "motion_scale": 1.0,
+    "shared_scale": 1.0,
+    "timestamp": "20260403_051109"
+}

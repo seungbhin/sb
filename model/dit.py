@@ -48,27 +48,33 @@ class Adapter(nn.Module):
             self._need_condition = False
 
         init.zeros_(self.up_linear.weight)
-        init.zeros_(self.up_linear.bias)
+        init.zeros_(self.up_linear.bias)\
 
     def forward(self, hidden_states, encoder_hidden_states=None, condition=None, condition_lam=1, text_seq_length=226):
+        
         if self.use_ff_adapter: 
             encoder_hidden_states = hidden_states[:, :text_seq_length]
             hidden_states = hidden_states[:, text_seq_length:]
         # cat video and text
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-
         hidden_states_in = hidden_states
+
+        # conditon 존재하면, condition 주입 
         if self._need_condition and condition is not None:
             hidden_states = hidden_states + condition_lam * self.condition_linear(condition)
+
         hidden_states = self.down_linear(hidden_states)
         hidden_states = F.gelu(hidden_states)
         hidden_states = self.up_linear(hidden_states)
+
+        # 잔차 결합 
         hidden_states += hidden_states_in
 
         # split video and text
         encoder_hidden_states = hidden_states[:, :text_seq_length]
         hidden_states = hidden_states[:, text_seq_length:]
 
+        # FF 어댑터 모드면 원형상 유지 위해 다시 합쳐 반환
         if self.use_ff_adapter:
             hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
             return hidden_states
@@ -216,7 +222,9 @@ class CogVideoXBlockWithAdapter(nn.Module):
 
         id_flag = False
         motion_flag = False
-        # attn adapter
+
+        ## 아래 코드 추가 
+        ##########################################################################################
         if self.use_id_adapter:
             id_flag = True
             id_adapter_hidden_states, id_adapter_encoder_hidden_states = self.id_attn_adapter(
@@ -259,6 +267,7 @@ class CogVideoXBlockWithAdapter(nn.Module):
         # add hidden_states separately
         attn_hidden_states = attn_hidden_states + id_adapter_hidden_states + motion_adapter_hidden_states
         attn_encoder_hidden_states = attn_encoder_hidden_states + id_adapter_encoder_hidden_states + motion_adapter_encoder_hidden_states
+        ##########################################################################################
 
         hidden_states = hidden_states + gate_msa * attn_hidden_states
         encoder_hidden_states = encoder_hidden_states + enc_gate_msa * attn_encoder_hidden_states
@@ -271,7 +280,8 @@ class CogVideoXBlockWithAdapter(nn.Module):
         # feed-forward
         norm_hidden_states = torch.cat([norm_encoder_hidden_states, norm_hidden_states], dim=1)
         ff_output = self.ff(norm_hidden_states)
-
+        
+        ##########################################################################################
         id_flag = False
         motion_flag = False
         # ff adapter
@@ -304,6 +314,7 @@ class CogVideoXBlockWithAdapter(nn.Module):
         
         # add hidden_states separately
         ff_output = ff_output + id_adapter_output + motion_adapter_output
+        ##########################################################################################
 
         hidden_states = hidden_states + gate_ff * ff_output[:, text_seq_length:]
         encoder_hidden_states = encoder_hidden_states + enc_gate_ff * ff_output[:, :text_seq_length]
