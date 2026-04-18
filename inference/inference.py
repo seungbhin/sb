@@ -16,7 +16,7 @@ def motion_ref_image_encoder(pretrained, image_path, device, dtype=torch.bfloat1
     image_encoder = FrozenOpenCLIPCustomEmbedder(pretrained, device=device)
     image_encoder.to(device=device, dtype=dtype)
     # load img
-    image = Image.open(image_path)
+    image = Image.open(image_path)RF
     if image.mode != 'RGB':
         image = image.convert('RGB')
     # trans img

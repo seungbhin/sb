@@ -1,0 +1,18 @@
+{
+    "lora_dir": "/home/sbjeon/workspace2/sb/train/output/train_lora/head_wise_dog_skateboarding",
+    "prompt": "A sks dog is vvt skateboarding through an open-air market, dodging fruit stands and weaving between busy shoppers.",
+    "model_path": "/home/sbjeon/.cache/huggingface/hub/models--THUDM--CogVideoX-2b/snapshots/1137dacfc2c9c012bed6a0793f4ecf2ca8e7ba01",
+    "id_scale": 1.5,
+    "motion_scale": 1.5,
+    "guidance_scale": 6.0,
+    "num_inference_steps": 50,
+    "use_dynamic_cfg": true,
+    "height": 480,
+    "width": 720,
+    "num_frames": 49,
+    "fps": 8,
+    "seed": 42,
+    "timestamp": "20260417_032514",
+    "id_adapter_type": "head_wise",
+    "motion_adapter_type": "head_wise"
+}

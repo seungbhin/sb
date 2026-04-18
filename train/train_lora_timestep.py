@@ -60,20 +60,29 @@ logger = get_logger(__name__)
 
 def get_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script for CogVideoX.")
-    ## lora 설정
+    ## lora 설정 (공통 기본값)
     parser.add_argument(
         "--rank",
         type=int,
         default=8,
-        help=("The dimension of the LoRA update matrices."),
+        help=("The dimension of the LoRA update matrices. Used as default for all adapters."),
     )
-    ## lora alpha가 update 전체 크기를 조절함.
     parser.add_argument(
         "--lora_alpha",
         type=float,
         default=8,
-        help=("The scaling factor to scale LoRA weight update. The actual scaling factor is `lora_alpha / rank`"),
+        help=("The scaling factor to scale LoRA weight update. Used as default for all adapters."),
     )
+    ## adapter별 rank/alpha (미지정 시 --rank, --lora_alpha 값 사용)
+    parser.add_argument("--id_rank",           type=int,   default=None)
+    parser.add_argument("--id_lora_alpha",     type=float, default=None)
+    parser.add_argument("--motion_rank",       type=int,   default=None)
+    parser.add_argument("--motion_lora_alpha", type=float, default=None)
+    parser.add_argument("--shared_rank",       type=int,   default=None)
+    parser.add_argument("--shared_lora_alpha", type=float, default=None)
+    parser.add_argument("--timestep_threshold", type=int,  default=500,
+                        help="Timestep threshold for early/late phase split. "
+                             "early(>=threshold): motion 위주, late(<threshold): id 위주")
 
     # Model information
     parser.add_argument(
@@ -441,6 +450,31 @@ def get_args():
         "--inf_eva_prompts",
         type=str,
         default=None,
+    )
+
+    parser.add_argument(
+        "--num_validation_videos",
+        type=int,
+        default=1,
+        help="Number of videos to generate per validation prompt.",
+    )
+    parser.add_argument(
+        "--guidance_scale",
+        type=float,
+        default=6.0,
+        help="Classifier-free guidance scale for validation inference.",
+    )
+    parser.add_argument(
+        "--use_dynamic_cfg",
+        action="store_true",
+        default=True,
+        help="Whether to use dynamic CFG during validation inference.",
+    )
+    parser.add_argument(
+        "--validation_prompt_separator",
+        type=str,
+        default=":::",
+        help="Separator used to split validation_prompt into multiple prompts.",
     )
 
     parser.add_argument(
@@ -873,6 +907,7 @@ def log_validation(
     pipeline_args,
     epoch,
     is_final_validation: bool = False,
+    save_dir: str = None,
 ):
     logger.info(
         f"Running validation... \n Generating {args.num_validation_videos} videos with prompt: {pipeline_args['prompt']}."
@@ -890,49 +925,49 @@ def log_validation(
 
     pipe.scheduler = CogVideoXDPMScheduler.from_config(pipe.scheduler.config, **scheduler_args)
     pipe = pipe.to(accelerator.device)
-    # pipe.set_progress_bar_config(disable=True)
 
     # run inference
     generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
 
+    phase_name = "test" if is_final_validation else "validation"
+    output_dir = save_dir if save_dir is not None else args.output_dir
+
+    prompt_slug = (
+        pipeline_args["prompt"][:25]
+        .replace(" ", "_")
+        .replace("'", "_")
+        .replace('"', "_")
+        .replace("/", "_")
+    )
+
     videos = []
-    for _ in range(args.num_validation_videos):
-        pt_images = pipe(**pipeline_args, generator=generator, output_type="pt").frames[0]
-        pt_images = torch.stack([pt_images[i] for i in range(pt_images.shape[0])])
+    video_filenames = []
+    for i in range(args.num_validation_videos):
+        with torch.no_grad():
+            pt_images = pipe(**pipeline_args, generator=generator, output_type="pt").frames[0]
+        pt_images = torch.stack([pt_images[j] for j in range(pt_images.shape[0])])
 
         image_np = VaeImageProcessor.pt_to_numpy(pt_images)
         image_pil = VaeImageProcessor.numpy_to_pil(image_np)
 
         videos.append(image_pil)
 
-    for tracker in accelerator.trackers:
-        phase_name = "test" if is_final_validation else "validation"
-        if tracker.name == "wandb":
-            video_filenames = []
-            for i, video in enumerate(videos):
-                prompt = (
-                    pipeline_args["prompt"][:25]
-                    .replace(" ", "_")
-                    .replace(" ", "_")
-                    .replace("'", "_")
-                    .replace('"', "_")
-                    .replace("/", "_")
-                )
-                filename = os.path.join(args.output_dir, f"{phase_name}_video_{i}_{prompt}.mp4")
-                export_to_video(video, filename, fps=8)
-                video_filenames.append(filename)
+        filename = os.path.join(output_dir, f"{phase_name}_step{epoch}_video{i}_{prompt_slug}.mp4")
+        export_to_video(image_pil, filename, fps=args.fps)
+        video_filenames.append(filename)
+        logger.info(f"Saved validation video: {filename}")
 
+    for tracker in accelerator.trackers:
+        if tracker.name == "wandb":
             tracker.log(
                 {
                     phase_name: [
                         wandb.Video(filename, caption=f"{i}: {pipeline_args['prompt']}")
                         for i, filename in enumerate(video_filenames)
                     ]
-                }
+                },
+                step=epoch,
             )
-
-    del pipe
-    free_memory()
 
     return videos
 
@@ -1187,6 +1222,16 @@ def main(args):
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
+            import json
+            args_dict = vars(args)
+            args_dict["train_script"] = "train/train_lora_timestep.py"
+            args_dict["adapter_config"] = {
+                "id_adapter":     {"rank": args.id_rank or args.rank, "lora_alpha": args.id_lora_alpha or args.lora_alpha, "target_modules": ["to_k", "to_q", "ff.net.0.proj"]},
+                "motion_adapter": {"rank": args.motion_rank or args.rank, "lora_alpha": args.motion_lora_alpha or args.lora_alpha, "target_modules": ["to_v", "to_out.0", "ff.net.0.proj", "ff.net.2.proj"]},
+                "shared_adapter": {"rank": args.shared_rank or args.rank, "lora_alpha": args.shared_lora_alpha or args.lora_alpha, "target_modules": ["ff.net.0.proj"]},
+            }
+            with open(os.path.join(args.output_dir, "train_args.json"), "w") as f:
+                json.dump(args_dict, f, indent=4)
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
@@ -1267,26 +1312,32 @@ def main(args):
     ## 두 adapter 모두 모든 관련 모듈을 target_modules로 포함
     ## - Early timestep: ["to_v", "to_out.0", "ff.net.0.proj", "ff.net.2.proj"] 학습, motion weight 크게
     ## - Late timestep:  ["to_k", "to_q", "ff.net.0.proj"] 학습, id weight 크게
+    id_rank           = args.id_rank           if args.id_rank           is not None else args.rank
+    id_lora_alpha     = args.id_lora_alpha     if args.id_lora_alpha     is not None else args.lora_alpha
+    motion_rank       = args.motion_rank       if args.motion_rank       is not None else args.rank
+    motion_lora_alpha = args.motion_lora_alpha if args.motion_lora_alpha is not None else args.lora_alpha
+    shared_rank       = args.shared_rank       if args.shared_rank       is not None else args.rank
+    shared_lora_alpha = args.shared_lora_alpha if args.shared_lora_alpha is not None else args.lora_alpha
+
     transformer_lora_config_id = LoraConfig(
-        r=args.rank,
-        lora_alpha=args.lora_alpha,
+        r=id_rank,
+        lora_alpha=id_lora_alpha,
         init_lora_weights=True,
-        target_modules=["to_k", "to_q", "to_v", "to_out.0", "ff.net.0.proj", "ff.net.2.proj"],
+        target_modules=["to_k", "to_q", "ff.net.0.proj"],
     )
     transformer.add_adapter(transformer_lora_config_id, adapter_name="id_adapter")
 
     transformer_lora_config_motion = LoraConfig(
-        r=args.rank,
-        lora_alpha=args.lora_alpha,
+        r=motion_rank,
+        lora_alpha=motion_lora_alpha,
         init_lora_weights=True,
-        target_modules=["to_k", "to_q", "to_v", "to_out.0", "ff.net.0.proj", "ff.net.2.proj"],
+        target_modules=["to_v", "to_out.0", "ff.net.0.proj", "ff.net.2.proj"],
     )
     transformer.add_adapter(transformer_lora_config_motion, adapter_name="motion_adapter")
 
     transformer_lora_config_shared = LoraConfig(
-        r=8,
-        # args.rank,
-        lora_alpha=8,
+        r=shared_rank,
+        lora_alpha=shared_lora_alpha,
         init_lora_weights=True,
         target_modules=["ff.net.0.proj"],
     )
@@ -1375,7 +1426,11 @@ def main(args):
         )
 
     if args.mixed_precision == "fp16":
-        cast_training_params([transformer], dtype=torch.float32)
+        # cast_training_params은 requires_grad=True인 파라미터만 캐스팅하지만,
+        # 현재 모든 LoRA 파라미터가 requires_grad=False 상태이므로 직접 캐스팅
+        for name, param in transformer.named_parameters():
+            if "lora" in name.lower():
+                param.data = param.data.to(torch.float32)
 
     ## p.requires_grad == True인 파라미터만 모으는 코드
     transformer_lora_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
@@ -1574,9 +1629,44 @@ def main(args):
     # For DeepSpeed training
     model_config = transformer.module.config if hasattr(transformer, "module") else transformer.config
    
-    # max step trainig 
+    ## prompt embeddings 미리 캐싱 (매 step마다 text encoder forward pass 방지)
+    prompt_embeds_cache = {}
+    all_prompts = (
+        [p for batch in train_dataloader_id for p in batch["prompts"]]
+        + [p for batch in train_dataloader_motion for p in batch["prompts"]]
+    )
+    for prompt in set(all_prompts):
+        prompt_embeds_cache[prompt] = compute_prompt_embeddings(
+            tokenizer,
+            text_encoder,
+            [prompt],
+            model_config.max_text_seq_length,
+            accelerator.device,
+            weight_dtype,
+            requires_grad=False,
+        )
+
+    ## rotary positional embeddings 캐싱 (height/width/frames 고정이므로 매 step 재계산 불필요)
+    ## num_frames는 VAE 인코딩 후의 latent frame 수 (temporal compression 반영)
+    latent_num_frames = train_dataset_id.instance_videos[0].sample().shape[1]
+    cached_rotary_emb = (
+        prepare_rotary_positional_embeddings(
+            height=args.height,
+            width=args.width,
+            num_frames=latent_num_frames,
+            vae_scale_factor_spatial=vae_scale_factor_spatial,
+            patch_size=model_config.patch_size,
+            attention_head_dim=model_config.attention_head_dim,
+            device=accelerator.device,
+        )
+        if model_config.use_rotary_positional_embeddings
+        else None
+    )
+
+    # max step trainig
     iter_id = iter(train_dataloader_id)
     iter_motion = iter(train_dataloader_motion)
+    prev_is_early = None  # phase 변경 감지용
 
     ## 
     while initial_global_step < args.max_train_steps:
@@ -1603,28 +1693,31 @@ def main(args):
         ## timestep에 따라 adapter 활성화 및 학습 가능 모듈 설정
         ## - Early (timestep >= threshold): ["to_v", "to_out.0", "ff.net.0.proj", "ff.net.2.proj"] 학습, motion weight 크게
         ## - Late  (timestep <  threshold): ["to_k", "to_q", "ff.net.0.proj"] 학습, id weight 크게
-        TIMESTEP_THRESHOLD = 200
-        # scheduler.config.num_train_timesteps // 2  # 500
-        EARLY_MODULES = ["to_v", "to_out", "ff.net.0.proj", "ff.net.2.proj"]
+        TIMESTEP_THRESHOLD = args.timestep_threshold
+        EARLY_MODULES = ["to_v", "to_out.0", "ff.net.0.proj", "ff.net.2.proj"]
         LATE_MODULES  = ["to_k", "to_q", "ff.net.0.proj"]
 
         mean_timestep = timesteps.float().mean().item()
         is_early = mean_timestep >= TIMESTEP_THRESHOLD
 
-        if is_early:
-            # Early timestep: motion adapter 가중치 크게
-            transformer.set_adapters(["motion_adapter", "id_adapter"], weights=[2.0, 1.0])
-            active_modules = EARLY_MODULES
-        else:
-            # Late timestep: id adapter 가중치 크게
-            transformer.set_adapters(["motion_adapter", "id_adapter"], weights=[1.0, 2.0])
-            active_modules = LATE_MODULES
-
-        for name, param in transformer.named_parameters():
-            if ("motion_adapter" in name or "id_adapter" in name) and any(m in name for m in active_modules):
-                param.requires_grad = True
+        ## phase가 바뀔 때만 set_adapters/requires_grad 업데이트 (매 step 호출 방지)
+        if is_early != prev_is_early:
+            if is_early:
+                transformer.set_adapters(["motion_adapter", "id_adapter", "shared_adapter"], weights=[2.0, 1.0, 2.0])
+                active_modules = EARLY_MODULES
             else:
-                param.requires_grad = False
+                transformer.set_adapters(["motion_adapter", "id_adapter", "shared_adapter"], weights=[1.0, 2.0, 2.0])
+                active_modules = LATE_MODULES
+
+            early_name_set = set()
+            for name, param in transformer.named_parameters():
+                if ("motion_adapter" in name or "id_adapter" in name or "shared_adapter" in name) and any(m in name for m in active_modules):
+                    param.requires_grad = True
+                    early_name_set.add(name)
+                else:
+                    param.requires_grad = False
+
+        prev_is_early = is_early
 
         models_to_accumulate = [transformer]
 
@@ -1634,38 +1727,15 @@ def main(args):
             model_input = batch["videos"].to(dtype=weight_dtype)  # [B, F, C, H, W]
             prompts = batch["prompts"]
 
-            print(f"selected_prompt: {prompts[0]}")
-            print(f"adapter_flag: {adapter_flag}, timestep_phase: {'early' if is_early else 'late'} (mean_t={mean_timestep:.0f}), active_modules: {active_modules}")
-
-            ## encode prompts
-            prompt_embeds = compute_prompt_embeddings(
-                tokenizer,
-                text_encoder,
-                prompts,
-                model_config.max_text_seq_length,
-                accelerator.device,
-                weight_dtype,
-                requires_grad=False,
-            )
+            ## encode prompts (캐시 사용)
+            prompt_embeds = torch.cat([prompt_embeds_cache[p] for p in prompts], dim=0)
 
             ## noisy latent 생성
             noise = torch.randn_like(model_input)
             batch_size, num_frames, num_channels, height, width = model_input.shape
 
-            ## Prepare rotary embeds
-            image_rotary_emb = (
-                prepare_rotary_positional_embeddings(
-                    height=args.height,
-                    width=args.width,
-                    num_frames=num_frames,
-                    vae_scale_factor_spatial=vae_scale_factor_spatial,
-                    patch_size=model_config.patch_size,
-                    attention_head_dim=model_config.attention_head_dim,
-                    device=accelerator.device,
-                )
-                if model_config.use_rotary_positional_embeddings
-                else None
-            )
+            ## rotary embeds (캐시 사용)
+            image_rotary_emb = cached_rotary_emb
 
             ## timestep에 따라 노이즈 추가 
             # model_input: clean VAE latent
@@ -1687,13 +1757,10 @@ def main(args):
             # datatypes = batch["datatype"] 
             # video_indices = [i for i, t in enumerate(datatypes) if t == 'video']
             # AiT Loss
-            if use_motion:
-                B = model_output.shape[0]
-                print("model_output[0] shape check", B)
-                offset_noise = torch.randn(B, 1, 1, height, width, device=model_input.device, dtype=model_output.dtype)
-                print("offset_noise shape check", offset_noise.shape)
-                print("model_output shape check", model_output.shape)
-                model_output = model_output + offset_noise
+            # if use_motion:
+            #    B = model_output.shape[0]
+            #    offset_noise = torch.randn(B, 1, 1, height, width, device=model_input.device, dtype=model_output.dtype)
+            #    model_output = model_output + offset_noise
 
             ## velocity 예측
             ## diffuser default setting
@@ -1787,21 +1854,39 @@ def main(args):
         progress_bar.set_postfix(**logs)
         accelerator.log(logs, step=global_step)
 
-        ## Validation용 Inference 코드
-        ## 현재 initial_global_step이 inference_steps의 배수 일때만 validation용 inference 수행
+        ## Validation용 Inference 코드 (SMRABooth 방식)
+        ## initial_global_step이 inference_steps의 배수일 때 validation inference 수행
         if accelerator.is_main_process:
-            if args.inf_eva_prompts and initial_global_step % args.inference_steps == 0:
-                # 검증용 새 파이프라인 생성 
-                pipe = CogVideoXPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    transformer=unwrap_model(transformer),
+            if args.inf_eva_prompts and initial_global_step > 0 and initial_global_step % args.inference_steps == 0:
+                import json as _json
+
+                validation_prompts = _json.loads(args.inf_eva_prompts)
+
+                val_output_dir = os.path.join(args.output_dir, f"validation_step_{initial_global_step}")
+                os.makedirs(val_output_dir, exist_ok=True)
+
+                transformer_unwrapped = unwrap_model(transformer)
+
+                # eval 모드로 전환 (SMRABooth처럼 inference 전 model 상태 분리)
+                transformer_unwrapped.eval()
+                # 모든 adapter 동시 활성화
+                active_adapter_names = list(transformer_unwrapped.peft_config.keys())
+                transformer_unwrapped.set_adapters(active_adapter_names)
+
+                # 학습 중인 transformer/text_encoder/vae/tokenizer로 검증용 파이프라인 구성
+                val_pipe = CogVideoXPipeline(
+                    tokenizer=tokenizer,
                     text_encoder=unwrap_model(text_encoder),
+                    vae=vae,
+                    transformer=transformer_unwrapped,
                     scheduler=scheduler,
-                    revision=args.revision,
-                    variant=args.variant,
-                    torch_dtype=weight_dtype,
                 )
-                validation_prompts = args.validation_prompt.split(args.validation_prompt_separator)
+                val_pipe = val_pipe.to(accelerator.device)
+                if args.enable_slicing:
+                    val_pipe.vae.enable_slicing()
+                if args.enable_tiling:
+                    val_pipe.vae.enable_tiling()
+
                 for validation_prompt in validation_prompts:
                     pipeline_args = {
                         "prompt": validation_prompt,
@@ -1809,20 +1894,26 @@ def main(args):
                         "use_dynamic_cfg": args.use_dynamic_cfg,
                         "height": args.height,
                         "width": args.width,
+                        "num_frames": args.max_num_frames,
                     }
-                    ### inference step 주기마다 시행되는 training 중간의 validation
-                    validation_outputs = log_validation(
-                        pipe=pipe,
+                    log_validation(
+                        pipe=val_pipe,
                         args=args,
                         accelerator=accelerator,
                         pipeline_args=pipeline_args,
-                        epoch=initial_global_step, 
-                        # 원래 epoch이였는데 initial_global_step이 맞는 것 같음. 
+                        epoch=initial_global_step,
+                        save_dir=val_output_dir,
                     )
+
+                # pipeline 참조 해제 (transformer/vae는 학습에 계속 사용)
+                del val_pipe
+                free_memory()
+
+                # 학습 모드 복원
+                transformer_unwrapped.train()
         
         ## 1 step 증가
         initial_global_step += 1
-        print("\033[1;31m training step: \033[0m", initial_global_step)
 
     ## Save the lora layers
     accelerator.wait_for_everyone()
@@ -1867,16 +1958,16 @@ def main(args):
         if args.enable_tiling:
             pipe.vae.enable_tiling()
 
-        # Load LoRA weights
-        lora_scaling = args.lora_alpha / args.rank
+        # Load LoRA weights (merged id + motion + shared adapter)
         pipe.load_lora_weights(args.output_dir, adapter_name="cogvideox-lora")
-        pipe.set_adapters(["cogvideox-lora"], [lora_scaling])
+        pipe.set_adapters(["cogvideox-lora"], [1.0])
 
-        ## 
+        ## Final validation inference
         validation_outputs = []
 
-        if args.validation_prompt and args.num_validation_videos > 0:
-            validation_prompts = args.validation_prompt.split(args.validation_prompt_separator)
+        if args.inf_eva_prompts and args.num_validation_videos > 0:
+            import json as _json
+            validation_prompts = _json.loads(args.inf_eva_prompts)
 
             for validation_prompt in validation_prompts:
                 pipeline_args = {
@@ -1885,19 +1976,20 @@ def main(args):
                     "use_dynamic_cfg": args.use_dynamic_cfg,
                     "height": args.height,
                     "width": args.width,
+                    "num_frames": args.max_num_frames,
                 }
 
-                # log_validation 함수 내부에서 video 저장됨 
                 video = log_validation(
                     pipe=pipe,
                     args=args,
                     accelerator=accelerator,
                     pipeline_args=pipeline_args,
-                    epoch=initial_global_step, # epoch에서 내가 수정함. 
+                    epoch=initial_global_step,
                     is_final_validation=True,
                 )
                 validation_outputs.extend(video)
-                # validation output 저장은 되는데, 출력은 안됨.
+                del pipe
+                free_memory()
 
     accelerator.end_training()
 

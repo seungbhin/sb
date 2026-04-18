@@ -1,5 +1,7 @@
 import os
+import json
 import torch
+from datetime import datetime
 from diffusers import CogVideoXPipeline, CogVideoXDPMScheduler
 from diffusers.utils import export_to_video
 import argparse
@@ -9,169 +11,216 @@ import argparse
 # Utility
 # ──────────────────────────────────────────────
 
-def is_adapter_empty(pipe, adapter_name):
-    count = 0
-    for _, module in pipe.transformer.named_modules():
-        if hasattr(module, "lora_A") and adapter_name in module.lora_A:
-            count += 1
-        if hasattr(module, "lora_B") and adapter_name in module.lora_B:
-            count += 1
-    return count == 0, count
-
-
 def print_adapter_info(pipe, adapter_names):
     from peft.tuners.tuners_utils import BaseTunerLayer
     print("\n=== Adapter 정보 ===")
     for adapter_name in adapter_names:
-        empty, count = is_adapter_empty(pipe, adapter_name)
+        count = 0
         scales = []
         for _, module in pipe.transformer.named_modules():
             if isinstance(module, BaseTunerLayer):
+                if hasattr(module, "lora_A") and adapter_name in module.lora_A:
+                    count += 1
                 if hasattr(module, "scaling") and adapter_name in module.scaling:
                     s = module.scaling[adapter_name]
                     scales.append(s.item() if hasattr(s, "item") else s)
-        scale_str = f"scale={scales[0]:.2f}" if scales else "scale=N/A"
-        print(f"  {adapter_name}: layers={count}, {scale_str}")
+        scale_str = f"scale={scales[0]:.4f}" if scales else "scale=N/A"
+        print(f"  {adapter_name}: lora_A layers={count}, {scale_str}")
 
 
-def split_state_dict(full_state_dict):
-    """
-    저장된 state_dict를 id / motion / shared adapter별로 분리.
+def load_train_args(lora_dir):
+    """train_args.json이 있으면 로드해서 반환, 없으면 None."""
+    path = os.path.join(lora_dir, "train_args.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return None
 
-    train_lora_timestep.py 저장 순서: {**motion, **id, **shared}
-    → 동일 key는 나중에 쓴 adapter(id, shared)가 최종 저장됨.
-    → 실효 매핑:
-        to_k, to_q               : id_adapter (id가 motion 덮어씀)
-        to_v, to_out.0, ff.net.2 : motion_adapter (motion이 먼저, but id overwrites → id의 미학습 weight)
-        ff.net.0.proj            : shared_adapter (shared가 최종)
 
-    train_lora.py 저장 순서도 동일하나 target_modules가 달라 충돌 없음:
-        id_adapter    → to_k, to_q
-        motion_adapter→ to_v, to_out.0, ff.net.2.proj
-        shared_adapter→ ff.net.0.proj
-    """
-    id_keys     = {k: v for k, v in full_state_dict.items()
-                   if any(t in k for t in ["to_k", "to_q"])
-                   and "ff.net" not in k}
+# ──────────────────────────────────────────────
+# Args
+# ──────────────────────────────────────────────
 
-    motion_keys = {k: v for k, v in full_state_dict.items()
-                   if any(t in k for t in ["to_v", "to_out.0", "ff.net.2.proj"])}
+def parse_args():
+    parser = argparse.ArgumentParser(description="CogVideoX dual-LoRA Inference")
 
-    shared_keys = {k: v for k, v in full_state_dict.items()
-                   if "ff.net.0.proj" in k}
+    # 필수 경로
+    parser.add_argument("--lora_dir", type=str, required=True,
+                        help="학습 출력 디렉토리 (id_adapter/, motion_adapter/ 가 있는 폴더)")
+    parser.add_argument("--prompt", type=str, required=True,
+                        help="생성할 영상의 텍스트 프롬프트")
+    parser.add_argument("--results_dir", type=str, default="inference/results",
+                        help="결과 저장 루트 디렉토리 (기본값: inference/results)")
 
-    return id_keys, motion_keys, shared_keys
+    # 모델 경로 (train_args.json에서 자동 추론 가능)
+    parser.add_argument("--model_path", type=str, default=None,
+                        help="CogVideoX 모델 경로. 미지정 시 train_args.json에서 자동 로드")
+
+    # Adapter 스케일
+    parser.add_argument("--id_scale",     type=float, default=1.0,
+                        help="id_adapter LoRA 스케일 (기본값: 1.0)")
+    parser.add_argument("--motion_scale", type=float, default=1.0,
+                        help="motion_adapter LoRA 스케일 (기본값: 1.0)")
+
+    # 생성 파라미터 (미지정 시 train_args.json 값 사용)
+    parser.add_argument("--guidance_scale",  type=float, default=None)
+    parser.add_argument("--use_dynamic_cfg", action="store_true", default=None)
+    parser.add_argument("--seed",            type=int,   default=42)
+    parser.add_argument("--fps",             type=int,   default=None)
+    parser.add_argument("--num_frames",      type=int,   default=None)
+    parser.add_argument("--height",          type=int,   default=None)
+    parser.add_argument("--width",           type=int,   default=None)
+
+    return parser.parse_args()
 
 
 # ──────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="CogVideoX LoRA Inference")
-
-    # 필수 경로
-    parser.add_argument("--lora_path", type=str, required=True,
-                        help="학습된 LoRA 경로 (디렉토리 또는 .safetensors 파일)")
-    parser.add_argument("--prompt", type=str, required=True,
-                        help="생성할 영상의 텍스트 프롬프트")
-    parser.add_argument("--output_path", type=str, default="output.mp4",
-                        help="저장할 영상 경로 (기본값: output.mp4)")
-
-    # 모델 경로
-    parser.add_argument("--model_path", type=str,
-                        default="/home/sbjeon/workspace/vc/DualReal/CogVideoX-5b",
-                        help="CogVideoX 모델 경로")
-
-    # Adapter 스케일
-    parser.add_argument("--id_scale",     type=float, default=1.0,
-                        help="id_adapter 스케일 (기본값: 1.0)")
-    parser.add_argument("--motion_scale", type=float, default=1.0,
-                        help="motion_adapter 스케일 (기본값: 1.0)")
-    parser.add_argument("--shared_scale", type=float, default=1.0,
-                        help="shared_adapter 스케일 (기본값: 1.0)")
-
-    # 생성 파라미터
-    parser.add_argument("--guidance_scale", type=float, default=6.0)
-    parser.add_argument("--seed",           type=int,   default=42)
-    parser.add_argument("--fps",            type=int,   default=8)
-    parser.add_argument("--num_frames",     type=int,   default=49)
-
-    return parser.parse_args()
-
-
 def main():
     args = parse_args()
 
-    # ── 출력 디렉토리 생성 ────────────────────────
-    output_dir = os.path.dirname(os.path.abspath(args.output_path))
+    lora_dir = os.path.abspath(args.lora_dir)
+    if not os.path.isdir(lora_dir):
+        raise FileNotFoundError(f"lora_dir을 찾을 수 없습니다: {lora_dir}")
+
+    # ── train_args.json으로 학습 설정 로드 ────────
+    train_args = load_train_args(lora_dir)
+    if train_args:
+        print(f"train_args.json 로드: {lora_dir}/train_args.json")
+
+    def resolve(arg_val, key, fallback):
+        """CLI 인자 > train_args.json > fallback 순으로 값 결정."""
+        if arg_val is not None:
+            return arg_val
+        if train_args and key in train_args and train_args[key] is not None:
+            return train_args[key]
+        return fallback
+
+    model_path    = resolve(args.model_path,    "pretrained_model_name_or_path", None)
+    guidance_scale = resolve(args.guidance_scale, "guidance_scale", 6.0)
+    fps           = resolve(args.fps,           "fps",           8)
+    num_frames    = resolve(args.num_frames,    "max_num_frames", 49)
+    height        = resolve(args.height,        "height",        480)
+    width         = resolve(args.width,         "width",         720)
+    use_dynamic_cfg = resolve(args.use_dynamic_cfg, "use_dynamic_cfg", True)
+
+    if model_path is None:
+        raise ValueError("--model_path 또는 train_args.json의 pretrained_model_name_or_path가 필요합니다.")
+
+    # ── LoRA 파일 경로 확인 ───────────────────────
+    id_adapter_path     = os.path.join(lora_dir, "id_adapter")
+    motion_adapter_path = os.path.join(lora_dir, "motion_adapter")
+
+    has_id     = os.path.isdir(id_adapter_path)
+    has_motion = os.path.isdir(motion_adapter_path)
+
+    if not has_id and not has_motion:
+        raise FileNotFoundError(
+            f"id_adapter/ 또는 motion_adapter/ 가 없습니다: {lora_dir}"
+        )
+
+    print(f"\n=== LoRA 구조 ===")
+    print(f"  id_adapter    : {'✅ ' + id_adapter_path if has_id else '❌ 없음'}")
+    print(f"  motion_adapter: {'✅ ' + motion_adapter_path if has_motion else '❌ 없음'}")
+
+    # ── 타임스탬프 출력 디렉토리 생성 ─────────────
+    # results/{YYYYMMDD_HHMMSS}/
+    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(args.results_dir, timestamp)
     os.makedirs(output_dir, exist_ok=True)
 
+    video_path       = os.path.join(output_dir, "video.mp4")
+    first_frame_path = os.path.join(output_dir, "video_first_frame.png")
+    args_json_path   = os.path.join(output_dir, "args.json")
+
     # ── Generator ────────────────────────────────
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
     generator = torch.Generator(device="cuda").manual_seed(args.seed)
 
     # ── Pipeline 로드 ─────────────────────────────
-    print(f"모델 로드 중: {args.model_path}")
+    print(f"\n모델 로드 중: {model_path}")
     pipe = CogVideoXPipeline.from_pretrained(
-        args.model_path,
+        model_path,
         torch_dtype=torch.bfloat16,
     )
     pipe.scheduler = CogVideoXDPMScheduler.from_config(pipe.scheduler.config)
-    # pipe.enable_slicing()
-    # pipe.enable_tiling()
+    pipe.vae.enable_slicing()
+    pipe.vae.enable_tiling()
     pipe.to("cuda")
 
-    # ── LoRA 로드 & Adapter 분리 ──────────────────
-    # 절대 경로 변환 + 디렉토리인 경우 파일명 자동 추가
-    lora_path = os.path.abspath(args.lora_path)
-    if os.path.isdir(lora_path):
-        lora_path = os.path.join(lora_path, "pytorch_lora_weights.safetensors")
-    if not os.path.isfile(lora_path):
-        raise FileNotFoundError(f"LoRA 파일을 찾을 수 없습니다: {lora_path}")
+    # ── LoRA 로드 ─────────────────────────────────
+    active_adapters = []
+    active_scales   = []
 
-    print(f"LoRA 로드 중: {lora_path}")
-    full_state_dict = CogVideoXPipeline.lora_state_dict(lora_path)
-    id_keys, motion_keys, shared_keys = split_state_dict(full_state_dict)
+    if has_id:
+        print(f"id_adapter 로드 중: {id_adapter_path}")
+        pipe.load_lora_weights(id_adapter_path, adapter_name="id_adapter")
+        active_adapters.append("id_adapter")
+        active_scales.append(args.id_scale)
 
-    print(f"  id_adapter    keys: {len(id_keys)}")
-    print(f"  motion_adapter keys: {len(motion_keys)}")
-    print(f"  shared_adapter keys: {len(shared_keys)}")
-
-    pipe.load_lora_weights(id_keys,     adapter_name="id_adapter")
-    pipe.load_lora_weights(motion_keys, adapter_name="motion_adapter")
-    pipe.load_lora_weights(shared_keys, adapter_name="shared_adapter")
+    if has_motion:
+        print(f"motion_adapter 로드 중: {motion_adapter_path}")
+        pipe.load_lora_weights(motion_adapter_path, adapter_name="motion_adapter")
+        active_adapters.append("motion_adapter")
+        active_scales.append(args.motion_scale)
 
     # ── Adapter 스케일 설정 ───────────────────────
-    pipe.set_adapters(
-        ["id_adapter", "motion_adapter", "shared_adapter"],
-        [args.id_scale, args.motion_scale, args.shared_scale],
-    )
-    print_adapter_info(pipe, ["id_adapter", "motion_adapter", "shared_adapter"])
+    pipe.set_adapters(active_adapters, active_scales)
+    print_adapter_info(pipe, active_adapters)
 
     # ── Inference ────────────────────────────────
     print(f"\n=== Inference 시작 ===")
-    print(f"  prompt      : {args.prompt}")
-    print(f"  scales      : id={args.id_scale}, motion={args.motion_scale}, shared={args.shared_scale}")
-    print(f"  guidance    : {args.guidance_scale}")
-    print(f"  seed        : {args.seed}")
-    print(f"  output      : {args.output_path}")
+    print(f"  prompt         : {args.prompt}")
+    print(f"  id_scale       : {args.id_scale}")
+    print(f"  motion_scale   : {args.motion_scale}")
+    print(f"  guidance_scale : {guidance_scale}")
+    print(f"  use_dynamic_cfg: {use_dynamic_cfg}")
+    print(f"  height x width : {height} x {width}")
+    print(f"  num_frames     : {num_frames}")
+    print(f"  fps            : {fps}")
+    print(f"  seed           : {args.seed}")
+    print(f"  output_dir     : {output_dir}")
 
     frames = pipe(
         prompt=args.prompt,
-        num_frames=args.num_frames,
-        guidance_scale=args.guidance_scale,
-        use_dynamic_cfg=False, ## Dynamic CFG 설정
+        height=height,
+        width=width,
+        num_frames=num_frames,
+        guidance_scale=guidance_scale,
+        use_dynamic_cfg=use_dynamic_cfg,
         generator=generator,
     ).frames[0]
 
     # ── 저장 ─────────────────────────────────────
-    export_to_video(frames, args.output_path, fps=args.fps)
-    print(f"\n저장 완료: {args.output_path}")
-
-    # 첫 프레임도 함께 저장
-    first_frame_path = args.output_path.replace(".mp4", "_first_frame.png")
+    export_to_video(frames, video_path, fps=fps)
     frames[0].save(first_frame_path)
-    print(f"첫 프레임 저장: {first_frame_path}")
+
+    # args.json 저장
+    args_dict = {
+        "lora_dir":        lora_dir,
+        "prompt":          args.prompt,
+        "model_path":      model_path,
+        "id_scale":        args.id_scale,
+        "motion_scale":    args.motion_scale,
+        "guidance_scale":  guidance_scale,
+        "use_dynamic_cfg": use_dynamic_cfg,
+        "height":          height,
+        "width":           width,
+        "num_frames":      num_frames,
+        "fps":             fps,
+        "seed":            args.seed,
+        "timestamp":       timestamp,
+    }
+    with open(args_json_path, "w") as f:
+        json.dump(args_dict, f, indent=4, ensure_ascii=False)
+
+    print(f"\n=== 저장 완료: {output_dir} ===")
+    print(f"  video          : {video_path}")
+    print(f"  first_frame    : {first_frame_path}")
+    print(f"  args           : {args_json_path}")
 
 
 if __name__ == "__main__":

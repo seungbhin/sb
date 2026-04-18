@@ -1,8 +1,0 @@
-{
-    "lora_path": "/home/sbjeon/workspace/sb/train/output/dog_playing_flute",
-    "prompt": "a dog is playing flute on the beach",
-    "id_scale": 1.0,
-    "motion_scale": 1.0,
-    "shared_scale": 1.0,
-    "timestamp": "20260403_045855"
-}

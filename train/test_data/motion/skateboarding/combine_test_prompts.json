@@ -1,0 +1,30 @@
+{
+    "prompts": {
+        "cat2": "A sks cat is vvt skateboarding in a quiet alleyway, with potted plants lining the walls and soft sunlight filtering through gaps between rooftops.",
+        "pet_cat1": "A sks cat is vvt skateboarding in a cozy library, weaving between stacks of books and jumping over open books on the floor.",
+        "pet_cat5": "A sks cat is vvt skateboarding along a cobblestone street in a European village, with quaint cottages and flower boxes in the windows.",
+        "pet_cat7": "A sks cat is vvt skateboarding on a rainy sidewalk, with puddles splashing as it glides and colorful umbrellas in the background.",
+        "dog": "A sks dog is vvt skateboarding through an open-air market, dodging fruit stands and weaving between busy shoppers.",
+        "dog2": "A sks dog is vvt skateboarding in a skatepark, performing tricks on ramps and grinding rails, with graffiti-covered walls in the background.",
+        "dog3": "A sks dog is vvt skateboarding on a cobblestone bridge over a winding river, with lanterns glowing softly as the sun sets.",
+        "dog5": "A sks dog is vvt skateboarding at a lakeside pier, jumping over wooden planks and gliding past fishermen casting their lines.",
+        "dog6": "A sks dog is vvt skateboarding across a windy desert plateau, with sand kicking up behind it and distant mountains on the horizon.",
+        "dog7": "A sks dog is vvt skateboarding through an amusement park, dodging roller coaster tracks and candy stands, with people cheering nearby.",
+        "dog8": "A sks dog is vvt skateboarding on a tree-lined avenue in autumn, with golden leaves falling and crunching under the wheels.",
+        "pet_dog1": "A sks dog is vvt skateboarding through a peaceful meadow at dawn, with soft mist rising and wildflowers dotting the grass.",
+        "duck_toy": "A yellow sks toy duck is vvt skateboarding in a bathtub, splashing water and weaving between rubber toys floating on the surface.",
+        "monster_toy": "A sks toy monster is vvt skateboarding through a neon-lit arcade, dodging pinball machines and flashing game screens.",
+        "plushie_happysad": "A sks plushie happysad is vvt skateboarding through a magical candy land, with chocolate hills, gummy trees, and a bridge made of licorice.",
+        "plushie_panda": "A sks plushie panda is vvt skateboarding on a peaceful mountain trail, with cherry blossoms in full bloom and a wooden temple in the distance.",
+        "plushie_teddybear": "A sks plushie teddy bear is vvt skateboarding through a cozy kitchen, jumping over spilled flour and gliding past stacks of cookies on the counter.",
+        "plushie_tortoise": "A sks plushie tortoise is vvt skateboarding across a garden pond, using stepping stones as ramps and dodging lily pads.",
+        "toy_bear": "A sks toy bear is vvt skateboarding down a spiral staircase in a grand castle, with suits of armor lining the walls and chandeliers hanging above.",
+        "robot_toy": "A sks toy robot is vvt skateboarding on the surface of Mars, leaving trails in the red dust and gliding past craters under a starry sky.",
+        "wolf_plushie": "A sks plushie wolf is vvt skateboarding through a dense pine forest at twilight, with fireflies glowing softly and a full moon rising above.",
+        "bear_plushie": "A sks plushie bear is vvt skateboarding along a serene riverside path, with willow trees swaying gently and ripples in the water nearby.",
+        "pink_plushie": "A sks plushie toy is vvt skateboarding in a magical fairy-tale castle, with sparkling towers, enchanted mirrors, and colorful banners swaying in the breeze.",
+        "sloth_plushie": "A sks plushie sloth is vvt skateboarding on a jungle canopy bridge, surrounded by vibrant flowers, chirping birds, and hanging vines.",
+        "terracotta_warrior": "A sks terracotta warrior is vvt skateboarding through a bustling ancient marketplace, dodging merchants and carts loaded with goods.",
+        "red_cartoon": "A sks cartoon demon is vvt skateboarding through a stormy volcanic plain, jumping over cracks in the ground as fiery sparks fly around."
+    }
+}

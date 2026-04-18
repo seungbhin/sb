@@ -2,17 +2,27 @@
 cd ..
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
-CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0
 export TRAIN_STEP=1000
-export MODEL_PATH='/home/sbjeon/workspace/vc/DualReal/CogVideoX-5b'
+export MODEL_PATH='/home/sbjeon/.cache/huggingface/hub/models--THUDM--CogVideoX-2b/snapshots/1137dacfc2c9c012bed6a0793f4ecf2ca8e7ba01'
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-export ID_PATH='train/test_data/identity/dog'
-export REF_PATH='train/test_data/identity/dog/images/00.png'
-export MOTION_PATH='train/test_data/motion/person_playing_flute'
-export OUTPUT_PATH='train/output/dog_playing_flute'
+export ID_PATH='/home/sbjeon/workspace2/sb/train/test_data/identity/dog'
+export REF_PATH='/home/sbjeon/workspace2/sb/train/test_data/identity/dog/images/00.png'
+export MOTION_PATH='/home/sbjeon/workspace2/sb/train/test_data/motion/playingGuitar'
+BASE_OUTPUT_PATH='/home/sbjeon/workspace2/sb/train/output/train_lora_timestep/dog_guitar'
+export OUTPUT_PATH="$BASE_OUTPUT_PATH"
+if [ -d "$OUTPUT_PATH" ]; then
+  i=1
+  while [ -d "${BASE_OUTPUT_PATH}_${i}" ]; do
+    i=$((i + 1))
+  done
+  export OUTPUT_PATH="${BASE_OUTPUT_PATH}_${i}"
+fi
+echo "출력 경로: $OUTPUT_PATH"
 
-accelerate launch --config_file train/config/finetune_adapter_single.yaml --multi_gpu \
+accelerate launch --config_file train/config/finetune_adapter_single.yaml \
+  --multi_gpu \
   train/train_lora_timestep.py \
   --gradient_checkpointing \
   --pretrained_model_name_or_path $MODEL_PATH \
@@ -28,7 +38,7 @@ accelerate launch --config_file train/config/finetune_adapter_single.yaml --mult
   --max_num_frames 49 \
   --skip_frames_start 0 \
   --skip_frames_end 0 \
-  --train_batch_size 3 \
+  --train_batch_size 1 \
   --train_batch_size_other 1 \
   --max_train_steps $TRAIN_STEP \
   --checkpointing_steps 100000 \
@@ -39,3 +49,13 @@ accelerate launch --config_file train/config/finetune_adapter_single.yaml --mult
   --instance_data_root_id $ID_PATH \
   --instance_data_root_motion $MOTION_PATH \
   --output_dir $OUTPUT_PATH \
+  --motion_ratio 0.5 \
+  --timestep_threshold 500 \
+  --rank 32 \
+  --lora_alpha 32 \
+  --id_rank 32 \
+  --id_lora_alpha 32 \
+  --motion_rank 64 \
+  --motion_lora_alpha 64 \
+  --shared_rank 8 \
+  --shared_lora_alpha 8 \

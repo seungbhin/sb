@@ -1,5 +1,5 @@
-dog *
-dog *
-dog *
-dog *
-dog *
+A picture of * dog
+A picture of * dog
+A picture of * dog
+A picture of * dog
+A picture of * dog

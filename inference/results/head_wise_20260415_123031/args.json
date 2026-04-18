@@ -1,0 +1,18 @@
+{
+    "lora_dir": "/home/sbjeon/workspace2/sb/train/output/train_lora/dog_guitar",
+    "prompt": "A sks dog is playing guitar on stage under spotlights",
+    "model_path": "/home/sbjeon/.cache/huggingface/hub/models--THUDM--CogVideoX-2b/snapshots/1137dacfc2c9c012bed6a0793f4ecf2ca8e7ba01",
+    "id_scale": 1.0,
+    "motion_scale": 1.0,
+    "guidance_scale": 6.0,
+    "num_inference_steps": 50,
+    "use_dynamic_cfg": true,
+    "height": 480,
+    "width": 720,
+    "num_frames": 49,
+    "fps": 8,
+    "seed": 42,
+    "timestamp": "20260415_123031",
+    "id_adapter_type": "peft",
+    "motion_adapter_type": "peft"
+}
